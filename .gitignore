@@ -1,0 +1,5 @@
+.build
+.swiftpm
+/server/digoxin
+.claude
+*.profraw
