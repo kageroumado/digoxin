@@ -163,7 +163,8 @@ let morning = Date(timeIntervalSince1970: 1_791_187_200)
         await digoxin.setTier(.off)
         #expect(await digoxin.status == .deletionPending)
         let left = try FileManager.default.contentsOfDirectory(atPath: root.path)
-        #expect(left == ["pending-deletion.json"], "only the signed delete is kept, never the key")
+        #expect(left == ["pending-deletions"], "only the signed delete is kept, never the key")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("pending-deletions").path).count == 1)
 
         clock.advance(days: 5)
         server.setOffline(false)
@@ -187,6 +188,76 @@ let morning = Date(timeIntervalSince1970: 1_791_187_200)
         #expect(server.requests("DELETE", "").count == 1)
         #expect(await digoxin.status == .off)
         #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+
+    /// Each install retired offline keeps its own delete: its key is gone,
+    /// so a delete overwritten would leave it on the server for good.
+    @Test func everyInstallTurnedOffOfflineIsDeleted() async throws {
+        let digoxin = client()
+        await digoxin.setTier(.counting)
+        await digoxin.recordUse()
+        let first = try #require(server.installs.first)
+        server.setOffline(true)
+        await digoxin.setTier(.off)
+        await digoxin.setTier(.counting)
+        await digoxin.recordUse()
+        await digoxin.setTier(.off)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("pending-deletions").path).count == 2)
+
+        server.setOffline(false)
+        await digoxin.flush()
+        #expect(!server.installs.contains(first))
+        #expect(server.installs.isEmpty)
+        #expect(server.requests("DELETE", "").count == 2)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+        #expect(await digoxin.status == .off)
+    }
+
+    /// Turned off while the attestation is made, the registration stops
+    /// there: its key is already destroyed and its delete sent.
+    @Test func turningOffDuringAttestationRegistersNothing() async throws {
+        let attestor = PausedAttestor()
+        let digoxin = makeClient(server: server, storage: storage, clock: clock, attestor: attestor)
+        await digoxin.setTier(.counting)
+        let using = Task { await digoxin.recordUse() }
+        await attestor.waitUntilEntered()
+        await digoxin.setTier(.off)
+        await attestor.resume()
+        await using.value
+        #expect(server.requests("POST", "/installs").isEmpty)
+        #expect(server.installs.isEmpty)
+        #expect(await digoxin.status == .off)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+
+    /// Turned off while the registration is on its way, the delete waits for
+    /// it: sent first, it would find nothing, and the registration would land
+    /// after it.
+    @Test func turningOffDuringRegistrationDeletesAfterIt() async throws {
+        let hold = server.holdRegistrations()
+        let digoxin = client()
+        await digoxin.setTier(.counting)
+        let using = Task { await digoxin.recordUse() }
+        await hold.arrival()
+        let turningOff = Task { await digoxin.setTier(.off) }
+        try await Task.sleep(for: .milliseconds(100))
+        hold.release.signal()
+        await turningOff.value
+        await using.value
+        #expect(server.requests.map(\.method).filter { $0 != "GET" } == ["POST", "DELETE"], "the registration, then its delete")
+        #expect(server.installs.isEmpty)
+        #expect(server.requests("POST", "/heartbeats").isEmpty)
+        #expect(await digoxin.status == .off)
+    }
+
+    /// The server reads every day as a Gregorian date, whatever calendar
+    /// the person reads dates in.
+    @Test(arguments: [Calendar.Identifier.buddhist, .japanese, .persian])
+    func daysAreGregorian(in identifier: Calendar.Identifier) async {
+        var calendar = Calendar(identifier: identifier)
+        calendar.timeZone = TimeZone(identifier: "Europe/Paris")!
+        let digoxin = makeClient(server: server, storage: storage, clock: clock, calendar: calendar)
+        #expect(await digoxin.dayKey(morning) == "2026-10-05")
     }
 
     @Test func stateSurvivesARelaunch() async throws {

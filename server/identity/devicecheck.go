@@ -161,8 +161,9 @@ const (
 // a forged token. holder is the install registering; a token another
 // holder spent inside TokenReuseWindow answers ErrTokenReused unasked.
 //
-// Calls with one token run one at a time. Two different tokens from one
-// Mac still race on Apple's bits, which nothing here can tell apart.
+// Calls with one token run one at a time. The update names only bit, so
+// two apps registering one Mac at once never clear each other's bit: Apple
+// leaves a bit the update omits as it was.
 func (d *DeviceCheck) MarkRegistered(ctx context.Context, deviceToken []byte, bit int, holder string) (bool, error) {
 	digest := sha256.Sum256(deviceToken)
 	stripe := &d.stripes[int(digest[0])%len(d.stripes)]
@@ -217,9 +218,14 @@ func (d *DeviceCheck) markRegistered(ctx context.Context, deviceToken []byte, bi
 	if bit == Bit0 && bits.Bit0 || bit == Bit1 && bits.Bit1 {
 		return true, nil
 	}
-	_, err = d.call(ctx, "/v1/update_two_bits", map[string]any{
+	update := map[string]any{
 		"device_token": token, "transaction_id": transactionID(), "timestamp": d.now().UnixMilli(),
-		"bit0": bits.Bit0 || bit == Bit0, "bit1": bits.Bit1 || bit == Bit1,
-	})
+	}
+	if bit == Bit0 {
+		update["bit0"] = true
+	} else {
+		update["bit1"] = true
+	}
+	_, err = d.call(ctx, "/v1/update_two_bits", update)
 	return false, err
 }

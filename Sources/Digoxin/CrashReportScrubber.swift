@@ -50,9 +50,11 @@ public struct ScrubRule: Sendable {
 ///   longer string (a simulator's device id in `coalitionName`, an
 ///   App Translocation folder) becomes the zero UUID too.
 ///
-/// A file that is not JSON (an exception log) gets the same text rewrites,
-/// with the `CrashReporter Key:`-style lines of the legacy text format
-/// emptied.
+/// Anything else (a plain log, an exception log, a report cut off mid-file)
+/// is scrubbed as text: the same rewrites over the whole file, `\/` read as
+/// `/`, the cleared fields' values replaced wherever `"key" : "value"`
+/// appears, and the `CrashReporter Key:`-style lines of the legacy text
+/// format emptied.
 public struct CrashReportScrubber: Sendable {
     /// What names this Mac and its account.
     public struct Machine: Sendable, Equatable {
@@ -112,25 +114,99 @@ public struct CrashReportScrubber: Sendable {
         try scrub(Data(contentsOf: url))
     }
 
-    /// `data` scrubbed: as JSON (one document or several, as `.ips` files
-    /// are) when it starts with `{` or `[`, as text otherwise.
+    /// `data` scrubbed: as JSON when the whole of it parses, as one document
+    /// or as an `.ips` file's header line and body; as text otherwise.
+    ///
+    /// UTF-16 and UTF-32 are read as UTF-8 first: their NUL bytes stand
+    /// between the letters of every name, where no rewrite would match, and
+    /// `JSONSerialization` parses those encodings too.
     public func scrub(_ data: Data) -> Data {
-        let start = data.first { ![0x20, 0x09, 0x0A, 0x0D].contains($0) }
-        if start == UInt8(ascii: "{") || start == UInt8(ascii: "[") {
+        let data = Self.utf8(data)
+        if Self.isJSON(data) {
             return scrubJSON(data)
         }
-        return Data(scrubText(String(decoding: data, as: UTF8.self)).utf8)
+        return Data(scrubLog(String(decoding: data, as: UTF8.self)).utf8)
     }
 
-    /// `text` scrubbed as a plain log.
+    /// `text` scrubbed the same way.
     public func scrub(_ text: String) -> String {
         String(decoding: scrub(Data(text.utf8)), as: UTF8.self)
     }
 
+    // MARK: - Encoding
+
+    /// `data` as UTF-8: decoded from UTF-16 or UTF-32 when its byte order
+    /// mark or the NULs among its first four bytes say it is one, and with
+    /// every NUL byte dropped otherwise, which UTF-8 text never holds.
+    static func utf8(_ data: Data) -> Data {
+        guard data.contains(0) else { return data }
+        if let encoding = wideEncoding(of: data), var text = wideText(data, as: encoding) {
+            text = text.replacingOccurrences(of: "\0", with: "")
+            if text.first == "\u{FEFF}" { text.removeFirst() }
+            return Data(text.utf8)
+        }
+        return data.filter { $0 != 0 }
+    }
+
+    /// `data` decoded as `encoding`, a malformed unit as U+FFFD and a cut
+    /// last unit dropped. `nil` when a unit holds two printable ASCII bytes:
+    /// that is ASCII read as wide text (binary, or UTF-8 after a wide start),
+    /// and decoding it would turn two letters at a time into one character
+    /// that no rewrite matches and that encodes back to the same bytes.
+    private static func wideText(_ data: Data, as encoding: String.Encoding) -> String? {
+        let bytes = [UInt8](data)
+        let width = encoding == .utf32LittleEndian || encoding == .utf32BigEndian ? 4 : 2
+        let bigEndian = encoding == .utf16BigEndian || encoding == .utf32BigEndian
+        var values: [UInt32] = []
+        values.reserveCapacity(bytes.count / width)
+        for start in stride(from: 0, through: bytes.count - width, by: width) {
+            let unit = bytes[start ..< start + width]
+            if unit.count(where: isPrintableASCII) >= 2 { return nil }
+            let ordered = bigEndian ? Array(unit) : unit.reversed()
+            values.append(ordered.reduce(0) { $0 << 8 | UInt32($1) })
+        }
+        if width == 2 {
+            return String(decoding: values.map { UInt16($0) }, as: UTF16.self)
+        }
+        var scalars = String.UnicodeScalarView()
+        scalars.append(contentsOf: values.map { Unicode.Scalar($0) ?? "\u{FFFD}" })
+        return String(scalars)
+    }
+
+    private static func isPrintableASCII(_ byte: UInt8) -> Bool {
+        (0x20 ... 0x7E).contains(byte) || byte == 0x09 || byte == 0x0A || byte == 0x0D
+    }
+
+    private static func wideEncoding(of data: Data) -> String.Encoding? {
+        let head = Array(data.prefix(4)) + [UInt8](repeating: 1, count: max(0, 4 - data.count))
+        switch (head[0], head[1], head[2], head[3]) {
+        case (0xFF, 0xFE, 0, 0), (_, 0, 0, 0) where head[0] != 0: return .utf32LittleEndian
+        case (0, 0, 0xFE, 0xFF), (0, 0, 0, _) where head[3] != 0: return .utf32BigEndian
+        case (0xFF, 0xFE, _, _), (_, 0, _, _) where head[0] != 0: return .utf16LittleEndian
+        case (0xFE, 0xFF, _, _), (0, _, _, _) where head[1] != 0: return .utf16BigEndian
+        default: return nil
+        }
+    }
+
     // MARK: - JSON
 
-    /// Copies the bytes through, rewriting the content of string literals.
-    /// A value whose key is a cleared field becomes the zero UUID.
+    /// Whether `data` is one JSON document, or two with the first on its
+    /// own line.
+    static func isJSON(_ data: Data) -> Bool {
+        let start = data.first { ![0x20, 0x09, 0x0A, 0x0D].contains($0) }
+        guard start == UInt8(ascii: "{") || start == UInt8(ascii: "[") else { return false }
+        if parses(data[...]) { return true }
+        guard let newline = data.firstIndex(of: 0x0A) else { return false }
+        return parses(data[..<newline]) && parses(data[data.index(after: newline)...])
+    }
+
+    private static func parses(_ data: Data.SubSequence) -> Bool {
+        (try? JSONSerialization.jsonObject(with: Data(data))) != nil
+    }
+
+    /// Copies the bytes through, rewriting the content of string literals,
+    /// keys and values alike. A value whose key is a cleared field becomes
+    /// the zero UUID.
     func scrubJSON(_ data: Data) -> Data {
         let bytes = [UInt8](data)
         var output = [UInt8]()
@@ -156,17 +232,20 @@ public struct CrashReportScrubber: Sendable {
             var next = index
             while next < bytes.count, isJSONSpace(bytes[next]) { next += 1 }
             let isKey = next < bytes.count && bytes[next] == UInt8(ascii: ":")
+            // Only JSON the parser accepted reaches here, so a literal that
+            // will not decode is a disagreement between the two: fail closed.
             guard let decoded = decodeLiteral(raw) else {
-                output.append(contentsOf: raw)
-                continue
-            }
-            if isKey {
-                lastKey = decoded
-                output.append(contentsOf: raw)
+                output.append(contentsOf: encodeLiteral("<removed>"))
+                afterColon = false
                 continue
             }
             var value = decoded
-            if afterColon, let key = lastKey, fields.contains(key) {
+            if isKey {
+                lastKey = decoded
+                if !Self.isUUID(decoded) {
+                    value = scrubText(decoded, embeddedUUIDs: true)
+                }
+            } else if afterColon, let key = lastKey, fields.contains(key) {
                 value = Self.isUUID(decoded) || decoded.isEmpty ? Self.zeroUUID : "<removed>"
             } else if !Self.isUUID(decoded) {
                 value = scrubText(decoded, embeddedUUIDs: true)
@@ -250,6 +329,31 @@ public struct CrashReportScrubber: Sendable {
     private nonisolated(unsafe) static let email = /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/
     private nonisolated(unsafe) static let legacyIDLine =
         /(?m)^(Anonymous UUID|Sleep\/Wake UUID|CrashReporter Key|Boot Session UUID):[ \t]*\S+/
+
+    /// A file that is not JSON, scrubbed as text. A JSON report cut short
+    /// lands here too, so its escaped slashes are read as slashes and its
+    /// cleared fields are found by their keys.
+    func scrubLog(_ text: String) -> String {
+        scrubText(clearingFields(in: text.replacingOccurrences(of: "\\/", with: "/")))
+    }
+
+    /// `text` with the value of every `"field" : "value"` of a cleared field
+    /// replaced, an unterminated last value included.
+    private func clearingFields(in text: String) -> String {
+        guard text.contains("\""), fields.contains(where: { text.contains($0) }) else { return text }
+        let keys = fields.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+        guard let regex = try? NSRegularExpression(pattern: #""(?:\#(keys))"\s*:\s*"((?:[^"\\]|\\.)*)"?"#) else {
+            return text
+        }
+        var result = text
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex ..< text.endIndex, in: text))
+        for match in matches.reversed() {
+            guard let range = Range(match.range(at: 1), in: result) else { continue }
+            let value = String(result[range])
+            result.replaceSubrange(range, with: Self.isUUID(value) || value.isEmpty ? Self.zeroUUID : "<removed>")
+        }
+        return result
+    }
 
     /// `text` with the built-in rewrites and the app's rules applied.
     /// `embeddedUUIDs` also zeroes UUIDs that are part of a longer string.

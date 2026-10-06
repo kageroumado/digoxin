@@ -117,6 +117,86 @@ func ipsDocuments(_ data: Data) throws -> (header: [String: Any], body: [String:
         #expect(!scrubbed.lowercased().contains("alice"))
     }
 
+    /// A log line can open with a bracket and still be no JSON at all.
+    @Test func bracketedLogsAreScrubbedAsText() {
+        let log = "[2026-10-05 12:00:00] Alices-MacBook-Pro failed opening /Users/alice/private.txt; alice@example.com; https://example.com/private?token=SECRET"
+        #expect(scrubber.scrub(log) == "[2026-10-05 12:00:00] <host> failed opening ~/private.txt; <email>; https://example.com")
+    }
+
+    /// A report cut off mid-file is no JSON: scrubbed as text, it still loses
+    /// its paths, its ids and the string left open at the cut.
+    @Test func truncatedReportsLoseTheMachineToo() {
+        let cut = ipsFixture.range(of: "\"asi\"")!.lowerBound
+        let truncated = String(ipsFixture[..<cut]) + #""asi" : {"Refrax":["Signed in as alice@example.org, file:\/\/\/Users\/alice"#
+        let text = scrubber.scrub(truncated)
+        #expect(text.contains(#""crashReporterKey" : "\#(CrashReportScrubber.zeroUUID)""#))
+        #expect(text.contains("\"procPath\" : \"~/Applications/Refrax.app/Contents/MacOS/Refrax\""))
+        #expect(text.contains("230a6330-9cd9-31ab-9b1c-3025ddf7482f"), "image UUIDs symbolicate the report")
+        for leak in ["alice", "Alice", "hunter2", "token=abc", "9CE69F15", "1D2B6F0A", "AF0E9B7C", "9CA13F44"] {
+            #expect(!text.contains(leak), "\(leak) is still in the report")
+        }
+    }
+
+    /// `JSONSerialization` reads UTF-16 and UTF-32 as well, where a NUL
+    /// stands between the letters of every ASCII name.
+    @Test(arguments: [String.Encoding.utf16LittleEndian, .utf16BigEndian, .utf32LittleEndian, .utf32BigEndian])
+    func wideEncodingsAreScrubbedToo(_ encoding: String.Encoding) throws {
+        let inputs = [
+            #"{"p":"\/Users\/alice\/x alice@example.com","h":"Alice’s MacBook Pro"}"#,
+            "[x] /Users/alice/y alice@example.com on Alice’s MacBook Pro",
+            "\u{FEFF}[x] Alice Liddell on Alice’s MacBook Pro",
+        ]
+        for input in inputs {
+            let scrubbed = scrubber.scrub(try #require(input.data(using: encoding)))
+            #expect(!scrubbed.contains(0))
+            let text = String(decoding: scrubbed, as: UTF8.self)
+            #expect(!text.lowercased().contains("alice") && !text.contains("MacBook"), "\(text)")
+        }
+    }
+
+    /// Binary whose second byte is NUL is no UTF-16: read as UTF-16 its
+    /// ASCII would become CJK, out of every rewrite's reach.
+    @Test func binaryWithNULsKeepsItsASCIIScrubbable() {
+        var data = Data([0x7F, 0x00, 0xC3, 0x9A, 0xE1, 0x80, 0xF0])
+        data += Data("/Users/alice/secret.txt".utf8) + Data([0x00, 0x8A, 0x91])
+        let text = String(decoding: scrubber.scrub(data), as: UTF8.self)
+        #expect(text.contains("~/secret.txt"))
+        #expect(!text.contains("alice"))
+    }
+
+    /// UTF-16 for a while and UTF-8 after: read whole as UTF-16, the UTF-8
+    /// half would become CJK that hides its ASCII, two letters a character.
+    @Test(arguments: [String.Encoding.utf16LittleEndian, .utf16BigEndian, .utf32LittleEndian, .utf32BigEndian])
+    func mixedEncodingsHideNothing(_ encoding: String.Encoding) throws {
+        let data = try #require("[x] started on Alice’s MacBook Pro\n".data(using: encoding))
+            + Data("[y] /Users/alice/secret.txt alice@example.com\n".utf8)
+        let scrubbed = scrubber.scrub(data)
+        let text = String(decoding: scrubbed, as: UTF8.self)
+        #expect(text.contains("~/secret.txt <email>"), "\(text)")
+        for reading in [String.Encoding.utf16LittleEndian, .utf16BigEndian] {
+            let reread = text.data(using: reading).map { String(decoding: $0, as: UTF8.self) } ?? ""
+            #expect(!reread.contains("alice"), "the UTF-8 half survives as \(reading)")
+        }
+    }
+
+    /// One malformed unit or a cut last byte loses that character, never
+    /// the decoding of the rest.
+    @Test func damagedWideTextIsStillDecoded() throws {
+        let data = try #require("Alice’s MacBook Pro ".data(using: .utf16LittleEndian))
+            + Data([0x00, 0xD8]) + #require(" Alice Liddell".data(using: .utf16LittleEndian)) + Data([0x41])
+        let text = String(decoding: scrubber.scrub(data), as: UTF8.self)
+        #expect(text == "<host> \u{FFFD} <user>")
+    }
+
+    /// Keys are text too: an app's JSON can key a dictionary by path,
+    /// address or host, while a report's own keys stay as they are.
+    @Test func keysAreScrubbedLikeValues() throws {
+        let json = #"{"\/Users\/alice\/doc.txt":3,"alice@example.com":{"Alices-MacBook-Pro":true},"usedImages":[]}"#
+        let object = try #require(try JSONSerialization.jsonObject(with: scrubber.scrub(Data(json.utf8))) as? [String: Any])
+        #expect(Set(object.keys) == ["~/doc.txt", "<email>", "usedImages"])
+        #expect((object["<email>"] as? [String: Bool])?.keys.first == "<host>")
+    }
+
     @Test func appRulesRunToo() throws {
         let rules: [ScrubRule] = [
             .replacing("Profile 7", with: "<profile>"),

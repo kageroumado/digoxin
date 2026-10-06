@@ -110,8 +110,8 @@ func (f *FakeApple) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		DeviceToken string `json:"device_token"`
-		Bit0        bool   `json:"bit0"`
-		Bit1        bool   `json:"bit1"`
+		Bit0        *bool  `json:"bit0"`
+		Bit1        *bool  `json:"bit1"`
 	}
 	raw, _ := io.ReadAll(r.Body)
 	_ = json.Unmarshal(raw, &body)
@@ -127,7 +127,15 @@ func (f *FakeApple) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write([]byte("Failed to find bit state"))
 	case "/v1/update_two_bits":
-		f.bits[device(body.DeviceToken)] = [2]bool{body.Bit0, body.Bit1}
+		// A bit the update omits keeps its value.
+		bits := f.bits[device(body.DeviceToken)]
+		if body.Bit0 != nil {
+			bits[0] = *body.Bit0
+		}
+		if body.Bit1 != nil {
+			bits[1] = *body.Bit1
+		}
+		f.bits[device(body.DeviceToken)] = bits
 	default:
 		http.NotFound(w, r)
 	}

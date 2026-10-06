@@ -36,6 +36,47 @@ struct NoAttestor: Attestor {
     }
 }
 
+/// An attestor that holds each attestation until the test resumes it.
+actor PausedAttestor: Attestor {
+    private var entered = false
+    private var observer: CheckedContinuation<Void, Never>?
+    private var release: CheckedContinuation<Void, Never>?
+
+    func evidence(for key: any InstallKey, challenge: Data, log: @Sendable (String) -> Void) async -> Evidence {
+        entered = true
+        observer?.resume()
+        observer = nil
+        await withCheckedContinuation { release = $0 }
+        return Evidence()
+    }
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { observer = $0 }
+    }
+
+    func resume() {
+        release?.resume()
+        release = nil
+    }
+}
+
+/// A registration request held on its way to the server: `entered` is
+/// signaled when it arrives, and it is answered once `release` is.
+struct RegistrationHold: Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+
+    func arrival() async {
+        await withCheckedContinuation { arrived in
+            DispatchQueue.global().async {
+                entered.wait()
+                arrived.resume()
+            }
+        }
+    }
+}
+
 /// A request the fake server took, with its body as sent.
 struct Recorded: Sendable {
     var method: String
@@ -85,6 +126,7 @@ final class FakeServer: Sendable {
         var scripted: [Int] = []
         var offline = false
         var trust = "unverified"
+        var hold: RegistrationHold?
     }
 
     let state = Mutex(State())
@@ -103,6 +145,21 @@ final class FakeServer: Sendable {
     }
 
     func setOffline(_ offline: Bool) { state.withLock { $0.offline = offline } }
+    /// Holds the next registration until the test releases it.
+    func holdRegistrations() -> RegistrationHold {
+        let hold = RegistrationHold()
+        state.withLock { $0.hold = hold }
+        return hold
+    }
+
+    /// The hold for `request`, taken: it applies to one registration.
+    func takeHold(for request: URLRequest) -> RegistrationHold? {
+        guard request.httpMethod == "POST", request.url?.path.hasSuffix("/installs") == true else { return nil }
+        return state.withLock { state in
+            defer { state.hold = nil }
+            return state.hold
+        }
+    }
     func script(_ statuses: Int...) { state.withLock { $0.scripted += statuses } }
     func forget() { state.withLock { $0.installs = [:] } }
     var installs: [String] { state.withLock { Array($0.installs.keys) } }
@@ -176,6 +233,18 @@ final class MockURLProtocol: URLProtocol {
 
     override func startLoading() {
         let server = request.url?.host.flatMap { host in Self.servers.withLock { $0[host] } }
+        if let hold = server?.takeHold(for: request) {
+            DispatchQueue.global().async {
+                hold.entered.signal()
+                hold.release.wait()
+                self.answer(from: server)
+            }
+            return
+        }
+        answer(from: server)
+    }
+
+    private func answer(from server: FakeServer?) {
         guard let server, let answer = server.handle(request, body: Self.body(of: request)) else {
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
             return
@@ -229,19 +298,20 @@ func temporaryFolder() -> URL {
 
 func makeClient(
     server: FakeServer, storage: URL, clock: TestClock, keyStore: any InstallKeyStore = SoftwareKeyStore(),
+    attestor: any Attestor = NoAttestor(), calendar: Calendar? = nil,
     properties: [String: TelemetryValue] = ["chromiumInstalled": true],
 ) -> Digoxin {
     let sessionConfiguration = URLSessionConfiguration.ephemeral
     sessionConfiguration.protocolClasses = [MockURLProtocol.self]
-    var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = TimeZone(identifier: "Europe/Paris")!
+    var paris = Calendar(identifier: .gregorian)
+    paris.timeZone = TimeZone(identifier: "Europe/Paris")!
     let configuration = Digoxin.Configuration(
         app: "refrax", baseURL: server.baseURL, storageDirectory: storage,
         propertiesProvider: { properties }, crashContextProvider: { ["engines": "webkit-621"] }, log: { _ in },
     )
     return Digoxin(
-        configuration: configuration, keyStore: keyStore, attestor: NoAttestor(),
-        sessionConfiguration: sessionConfiguration, now: { clock.now }, calendar: calendar,
+        configuration: configuration, keyStore: keyStore, attestor: attestor,
+        sessionConfiguration: sessionConfiguration, now: { clock.now }, calendar: calendar ?? paris,
         info: { fixedInfo }, bundlePath: "/Applications/Refrax.app",
     )
 }

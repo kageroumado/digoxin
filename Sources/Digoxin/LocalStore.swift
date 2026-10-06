@@ -128,7 +128,8 @@ struct Envelope: Encodable {
 
 /// A signed delete made when the person turned telemetry off, kept until
 /// the server confirms it. It holds no key: the key was destroyed when the
-/// request was signed.
+/// request was signed, so it is the only way left to delete that install,
+/// and every install retired this way keeps its own until it resolves.
 struct PendingDeletion: Codable, Equatable {
     var install: String
     var body: Data
@@ -145,7 +146,11 @@ struct LocalStore {
     var stateURL: URL { root.appendingPathComponent("state.json") }
     var heartbeatsURL: URL { root.appendingPathComponent("heartbeats.json") }
     var crashesURL: URL { root.appendingPathComponent("crashes", isDirectory: true) }
-    var pendingDeletionURL: URL { root.appendingPathComponent("pending-deletion.json") }
+    var pendingDeletionsURL: URL { root.appendingPathComponent("pending-deletions", isDirectory: true) }
+
+    func pendingDeletionURL(install: String) -> URL {
+        pendingDeletionsURL.appendingPathComponent("\(install).json")
+    }
 
     static let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -186,10 +191,22 @@ struct LocalStore {
         (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
     }
 
-    /// Removes everything but a pending deletion; removes the folder itself
-    /// when nothing is pending.
-    func wipe(keeping pending: PendingDeletion?) {
-        remove(root)
-        if let pending { write(pending, to: pendingDeletionURL) }
+    /// The installs whose delete the server has yet to confirm.
+    func pendingDeletions() -> [PendingDeletion] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: pendingDeletionsURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles],
+        )) ?? []
+        return files.compactMap { read(PendingDeletion.self, from: $0) }.sorted { $0.created < $1.created }
+    }
+
+    /// Removes everything but the pending deletions, adding `pending` to
+    /// them; removes the folder itself when nothing is pending.
+    func wipe(adding pending: PendingDeletion?) {
+        let items = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+        for item in items where item.standardizedFileURL != pendingDeletionsURL.standardizedFileURL {
+            remove(item)
+        }
+        if let pending { write(pending, to: pendingDeletionURL(install: pending.install)) }
+        if pendingDeletions().isEmpty { remove(root) }
     }
 }

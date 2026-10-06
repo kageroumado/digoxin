@@ -12,9 +12,9 @@ of three tiers in the app's settings; the library enforces it.
 **Off** (the default). No key is created, no file is written, no request is made.
 Choosing *off* after another tier signs one delete request with the install's key,
 then destroys the key, its state and everything queued, on the spot. The signed
-request is the one file kept, and it holds no key; it is sent until the server
-confirms it, after which the server holds nothing from that install: the install,
-every heartbeat and every crash report with its files are deleted.
+request is the one file kept per install turned off, and it holds no key; it is sent
+until the server confirms it, after which the server holds nothing from that install:
+the install, every heartbeat and every crash report with its files are deleted.
 
 **Counting.** One heartbeat per local calendar day on which the app is used:
 
@@ -26,7 +26,7 @@ every heartbeat and every crash report with its files are deleted.
 | `chipFamily` | `M1` … `M5`, `Intel`, `unknown` |
 | `memoryClassGB` | 8, 16, 24, 32, 36, 48, 64, 96, 128 (rounded down) |
 | `language` | `fr` (two letters) |
-| `day` | `2026-10-05`, the local date |
+| `day` | `2026-10-05`, the local date, always Gregorian |
 | `activeDays7` | days with use in the last 7, counted on the Mac |
 | `properties` | the app's own flags, each on the server's allowlist for that app |
 
@@ -65,9 +65,12 @@ stored or sent:
 
 What a report still says: the stack, the loaded images and their UUIDs, register
 values, the Mac's model code (`Mac13,1`), the macOS build, uptime, and the crash's
-date with its time-zone offset. That is what symbolication and triage need. Every
-number is the byte the system wrote: the scrubber rewrites only the text of JSON
-strings, so the file is still a valid `.ips`.
+date with its time-zone offset. Symbolication and triage need these. Every
+number is the byte the system wrote: in a file that parses as JSON (an `.ips` is a
+header line and a body), the scrubber rewrites only the text of strings, keys
+included, so the file is still a valid `.ips`. Any other file, a plain log or a
+report cut short, is scrubbed as text, and the cleared fields are found by their
+keys. UTF-16 and UTF-32 files are decoded first.
 
 ## How an install proves itself
 
@@ -90,6 +93,9 @@ strings, so the file is still a valid `.ips`.
      an install of this app before;
    - `unverified`: neither, as for debug and source builds, or App Attest without the
      token an app with a `registered_bit` requires.
+
+   An operator sets two more by hand, `verified` and `blocked`, and registration
+   keeps them.
 3. Every later request is signed with the Secure Enclave key and carries an envelope with
    the install id, a sequence number that must increase, and the time it was sent (within
    48 hours), so a captured request can be neither altered nor replayed.
@@ -175,8 +181,9 @@ by default).
 Property types are `bool`, `int`, `number` and `string` (64 characters at most); keys
 not listed, or of another type, are dropped. DeviceCheck gives a team two bits per Mac
 for all its apps, so `registered_bit` (`bit0` or `bit1`) can go to two apps at most,
-and only if nothing else of the team's sets that bit. An app without one is still proven by its token
-but does not tell reinstalls apart. The `.p8` key stays outside the repository; the
+and only if nothing else of the team's sets that bit; each app's update names only its
+own bit. An app without one is still proven by its token but does not tell reinstalls
+apart. The `.p8` key stays outside the repository; the
 service refuses one readable by everyone (group-readable, for a service user in its
 group, is fine).
 
@@ -245,7 +252,7 @@ carry no `Origin`, so a web page cannot reach it by rebinding a name to 127.0.0.
 | `GET /admin/{app}/crashes/{id}` | one report |
 | `GET /admin/{app}/crashes/{id}/files/{name}` | one file, as stored |
 
-Days are the client's local calendar days. `reregistered` installs (a reinstall on a
+Days are the client's local calendar days, as Gregorian dates. `reregistered` installs (a reinstall on a
 Mac already counted) are reported in their own column and left out of spreads by
 default.
 
@@ -261,7 +268,8 @@ Scripts/e2e.sh   # the Swift client against a local Go service, through this Mac
 
 - **Turning off signs the delete first.** The client signs the delete request, then
   destroys the key, and keeps only that signed request until the server confirms it, so
-  a Mac that was offline can still delete its data later. The server accepts a delete
+  a Mac that was offline can still delete its data later. Each install turned off keeps
+  its own, and a delete waits for a registration of the same install still in flight. The server accepts a delete
   sent up to 30 days ago; a replayed delete can only delete what its owner asked to.
 - **No tombstones.** A deleted install's row goes too; a `deleted` flag would keep the
   id, the one thing left to forget.
@@ -269,7 +277,7 @@ Scripts/e2e.sh   # the Swift client against a local Go service, through this Mac
   when they arrived, so no stored value says at what hour someone used an app. The admin
   stats default to the newest day heartbeats carry, since local days run ahead of UTC.
 - **Scrubbed ids become the zero UUID** instead of disappearing, so tools that expect the
-  field still parse the file; only the text of JSON strings is rewritten.
+  field still parse the file.
 - **The client is an actor.** It owns the sequence numbers, queues and retry timer, and
   does file I/O, Secure Enclave signing and network, none of which belongs on the main
   actor.

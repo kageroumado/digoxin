@@ -20,7 +20,9 @@ public actor Digoxin {
     let attestor: any Attestor
     let session: URLSession
     let now: @Sendable () -> Date
-    var calendar: Calendar
+    /// Gregorian whatever calendar the person reads dates in: the server
+    /// reads every day as a Gregorian date.
+    let calendar: Calendar
     let info: @Sendable () -> BasicInfo
     let bundlePath: String
     let store: LocalStore
@@ -36,6 +38,12 @@ public actor Digoxin {
     /// Bumped when the tier turns off, so a send in flight does not write
     /// back state the person just deleted.
     private var generation = 0
+    /// The registration request in flight, so a delete of the same install
+    /// waits for it: sent first, the delete would find nothing to delete and
+    /// the registration would land after it.
+    private var registration: (install: String, request: Task<Data, any Error>)?
+    /// The installs whose delete is being sent.
+    private var deleting: Set<String> = []
 
     static let heartbeatBatch = 8
     static let queueLife: TimeInterval = 7 * 24 * 3600
@@ -71,7 +79,9 @@ public actor Digoxin {
         self.attestor = attestor
         session = URLSession(configuration: sessionConfiguration)
         self.now = now
-        self.calendar = calendar
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        self.calendar = gregorian
         self.info = info
         self.bundlePath = bundlePath
         store = LocalStore(root: configuration.root)
@@ -88,7 +98,7 @@ public actor Digoxin {
     /// Where this client stands, for the app's settings to show.
     public var status: DigoxinStatus {
         if state.tier == .off {
-            return FileManager.default.fileExists(atPath: store.pendingDeletionURL.path) ? .deletionPending : .off
+            return store.pendingDeletions().isEmpty ? .off : .deletionPending
         }
         if !keyStore.isAvailable { return .secureEnclaveUnavailable }
         if let error = state.lastError { return .failing(reason: error) }
@@ -134,7 +144,7 @@ public actor Digoxin {
         noteVersion()
         let today = dayKey(now())
         let weekStart = dayKey(calendar.date(byAdding: .day, value: -6, to: now()) ?? now())
-        state.activeDays = Set(state.activeDays + [today]).filter { $0 >= weekStart }.sorted()
+        state.activeDays = Set(state.activeDays + [today]).filter { $0 >= weekStart && $0 <= today }.sorted()
         if state.lastHeartbeatDay != today {
             let generation = generation
             let properties = await configuration.propertiesProvider()
@@ -219,7 +229,7 @@ public actor Digoxin {
         guard !isFlushing else { return }
         isFlushing = true
         defer { isFlushing = false }
-        await sendPendingDeletion()
+        await sendPendingDeletions()
         guard state.tier != .off, !serviceAbsent, keyStore.isAvailable else { return }
         // A backoff that outlived the last launch is waited out.
         if let next = state.nextTry, next > now() {
@@ -236,6 +246,7 @@ public actor Digoxin {
         } catch is Superseded {
             return
         } catch {
+            guard generation == self.generation else { return }
             noteFailure(error)
         }
     }
@@ -327,41 +338,59 @@ public actor Digoxin {
                 log("could not sign the delete: \(error.localizedDescription)")
             }
         }
-        store.wipe(keeping: pending)
+        store.wipe(adding: pending)
         state = LocalState()
         lastFailure = nil
         serviceAbsent = false
         log(pending == nil ? "tier is off; nothing was registered" : "tier is off; local identity destroyed, deleting the install")
-        await sendPendingDeletion()
+        await sendPendingDeletions()
     }
 
-    private func sendPendingDeletion() async {
-        guard var pending = store.read(PendingDeletion.self, from: store.pendingDeletionURL) else { return }
+    /// Sends every delete the server has yet to confirm, oldest first, and
+    /// retries the ones that failed after the shortest of their backoffs.
+    private func sendPendingDeletions() async {
+        var waits: [Duration] = []
+        for pending in store.pendingDeletions() where !deleting.contains(pending.install) {
+            if let wait = await send(pending) { waits.append(wait) }
+        }
+        if let wait = waits.min() { scheduleRetry(in: wait) }
+    }
+
+    /// Sends one delete; answers the wait before its next try when it failed.
+    private func send(_ pending: PendingDeletion) async -> Duration? {
+        deleting.insert(pending.install)
+        defer { deleting.remove(pending.install) }
+        if let registration, registration.install == pending.install {
+            _ = await registration.request.result
+        }
         var request = URLRequest(url: configuration.endpoint("installs").appendingPathComponent(pending.install))
         request.httpMethod = "DELETE"
         request.httpBody = pending.body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(pending.install, forHTTPHeaderField: Self.installHeader)
         request.setValue(pending.signature.base64EncodedString(), forHTTPHeaderField: Self.signatureHeader)
+        let url = store.pendingDeletionURL(install: pending.install)
         do {
             _ = try await exchange(request)
             log("the server deleted install \(pending.install)")
-            finishDeletion()
+            finishDeletion(at: url)
         } catch let Failure.refused(status, reason) where (400 ..< 500).contains(status) && status != 429 {
-            log("the server refused the delete (\(status))\(reason.map { ": \($0)" } ?? ""); dropping it")
-            finishDeletion()
+            log("the server refused the delete of \(pending.install) (\(status))\(reason.map { ": \($0)" } ?? ""); dropping it")
+            finishDeletion(at: url)
         } catch {
-            pending.failures += 1
-            store.write(pending, to: store.pendingDeletionURL)
-            let wait = Self.wait(afterFailures: pending.failures - 1)
-            log("the delete is not sent yet (\(error)); next try in \(wait)")
-            scheduleRetry(in: wait)
+            guard var current = store.read(PendingDeletion.self, from: url) else { return nil }
+            current.failures += 1
+            store.write(current, to: url)
+            let wait = Self.wait(afterFailures: current.failures - 1)
+            log("the delete of \(pending.install) is not sent yet (\(error)); next try in \(wait)")
+            return wait
         }
+        return nil
     }
 
-    private func finishDeletion() {
-        store.remove(store.pendingDeletionURL)
-        if state.tier == .off { store.remove(store.root) }
+    private func finishDeletion(at url: URL) {
+        store.remove(url)
+        if state.tier == .off, store.pendingDeletions().isEmpty { store.remove(store.root) }
     }
 
     // MARK: - Sending
@@ -474,11 +503,11 @@ public actor Digoxin {
     }
 
     private func registeredKey(generation: Int) async throws -> any InstallKey {
+        guard generation == self.generation else { throw Superseded() }
         guard keyStore.isAvailable else { throw Failure.noSecureEnclave }
         let key = try loadOrCreateKey()
         guard state.registered != key.installID else { return key }
-        try await register(key)
-        guard generation == self.generation else { throw Superseded() }
+        try await register(key, generation: generation)
         return key
     }
 
@@ -504,14 +533,19 @@ public actor Digoxin {
         var device_check: String?
     }
 
-    private func register(_ key: any InstallKey) async throws {
+    /// Registers `key`, giving up at every suspension where the tier turned
+    /// off in the meantime: the key it holds is destroyed and its delete
+    /// signed, and nothing may follow that delete.
+    private func register(_ key: any InstallKey, generation: Int) async throws {
         let challengeData = try await exchange(URLRequest(url: configuration.endpoint("challenge")))
+        guard generation == self.generation else { throw Superseded() }
         guard let challenge = try? JSONDecoder().decode(Challenge.self, from: challengeData),
               let challengeBytes = Data(base64Encoded: challenge.challenge)
         else { throw Failure.refused(status: 200, reason: "no challenge") }
         let evidence = await attestor.evidence(for: key, challenge: challengeBytes) { [configuration] line in
             configuration.log(line)
         }
+        guard generation == self.generation else { throw Superseded() }
         log("registering with \(evidence.tier) evidence")
         var registration = Registration(
             public_key: key.publicKeyDER.base64EncodedString(), challenge: challenge.challenge,
@@ -521,9 +555,16 @@ public actor Digoxin {
             registration.app_attest = .init(key_id: keyID, attestation: attestation.base64EncodedString())
         }
         let body = try LocalStore.encoder.encode(registration)
+        let posting = Task(name: "Digoxin registration for \(configuration.app)") {
+            try await self.request("POST", "installs", body: body, contentType: "application/json", key: key)
+        }
+        self.registration = (key.installID, posting)
+        let result = await posting.result
+        self.registration = nil
+        guard generation == self.generation else { throw Superseded() }
         let answer: Data
         do {
-            answer = try await request("POST", "installs", body: body, contentType: "application/json", key: key)
+            answer = try result.get()
         } catch let Failure.refused(status: 429, reason: reason) where reason != Self.perMinuteLimit {
             throw Failure.registrationCapped(reason: reason)
         }
