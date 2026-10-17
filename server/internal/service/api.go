@@ -66,6 +66,8 @@ type Service struct {
 	Now      func() time.Time
 	// uploads holds a slot per crash report being received.
 	uploads chan struct{}
+	// actives is the answer of GET /v1/{app}/active per app, for activeCacheTTL.
+	actives activeCache
 }
 
 // New builds the service for config, loading each app's DeviceCheck key.
@@ -129,6 +131,7 @@ func (s *Service) Routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /v1/{app}/installs/{id}", s.withApp(s.handleDelete))
 	mux.HandleFunc("POST /v1/{app}/heartbeats", s.withApp(s.handleHeartbeats))
 	mux.HandleFunc("POST /v1/{app}/crash-reports", s.withApp(s.handleCrashReport))
+	mux.HandleFunc("GET /v1/{app}/active", s.withApp(s.handleActive))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		securityHeaders(w)
 		_, _ = w.Write([]byte("ok\n"))

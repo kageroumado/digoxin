@@ -822,3 +822,59 @@ func TestConfigChecks(t *testing.T) {
 		t.Fatalf("defaults %+v", sevo)
 	}
 }
+
+// ---- Public active count ----
+
+func TestActiveCountsYesterdayAtCountedTrustsAndCaches(t *testing.T) {
+	h := newHarness(t)
+	day := func(back int) string { return h.now.AddDate(0, 0, -back).Format(dayLayout) }
+	yesterday, older, re := newTestClient(t), newTestClient(t), newTestClient(t)
+	for _, c := range []*testClient{yesterday, older, re} {
+		h.register(c)
+	}
+	_ = h.svc.Store.saveInstall(context.Background(), "refrax", re.id, re.der, identity.Verdict{Trust: identity.TrustReregistered}, h.now)
+	answerOf(t, h.postHeartbeats(yesterday, validHeartbeat(day(1))))
+	answerOf(t, h.postHeartbeats(older, validHeartbeat(day(2))))
+	answerOf(t, h.postHeartbeats(re, validHeartbeat(day(1))))
+
+	get := func() (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		response := h.do("GET", "/v1/refrax/active", nil, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("active: %d %s", response.Code, response.Body)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &fields); err != nil {
+			t.Fatal(err)
+		}
+		return response, fields
+	}
+	response, fields := get()
+	if fields["app"] != "refrax" || fields["day"] != day(1) || fields["active"] != 1.0 || len(fields) != 3 {
+		t.Fatalf("active %v", fields)
+	}
+	if response.Header().Get("Cache-Control") != "public, max-age=600" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("headers %v", response.Header())
+	}
+
+	// A heartbeat that lands after the first answer shows once the cache
+	// expires, and the day rolls over without waiting for it.
+	late := newTestClient(t)
+	h.register(late)
+	answerOf(t, h.postHeartbeats(late, validHeartbeat(day(1))))
+	if _, fields := get(); fields["active"] != 1.0 {
+		t.Fatalf("answered outside the cache: %v", fields)
+	}
+	h.now = h.now.Add(activeCacheTTL)
+	if _, fields := get(); fields["active"] != 2.0 {
+		t.Fatalf("after the cache expired: %v", fields)
+	}
+	h.now = h.now.AddDate(0, 0, 1)
+	if _, fields := get(); fields["day"] != day(1) || fields["active"] != 0.0 {
+		t.Fatalf("the day after: %v", fields)
+	}
+
+	if response := h.do("GET", "/v1/nonesuch/active", nil, nil); response.Code != http.StatusNotFound {
+		t.Fatalf("unknown app: %d", response.Code)
+	}
+}

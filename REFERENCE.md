@@ -194,6 +194,7 @@ from Cloudflare alone: anyone who reaches Caddy directly can write that header.
 | `POST /v1/{app}/heartbeats` | signed batch of 1–8 heartbeats |
 | `POST /v1/{app}/crash-reports` | signed multipart: an `envelope` part and `file` parts |
 | `DELETE /v1/{app}/installs/{id}` | signed; deletes the install and everything it sent |
+| `GET /v1/{app}/active` | public: how many installs counted themselves in yesterday |
 
 A new install takes one of five daily slots of its address per app before Apple is asked,
 and gets it back when registration fails; an install may register again three times a
@@ -202,6 +203,15 @@ all answer `401` alike. A crash report is refused before any of its body is read
 its install is unknown, below `min_trust` or past its daily reports, or when the disk or
 the day's budget is spent; the body is then streamed to disk within the limits and kept
 only once its signature checks.
+
+`GET /v1/{app}/active` is the one unauthenticated, read-only route, for an app to show
+"Yesterday, N Macs counted themselves in" beside its consent toggle. It answers
+`{"app":"adrafinil","day":"2026-10-16","active":123}` and nothing more: `day` is yesterday
+in the server's clock (UTC), the newest day complete in every time zone, and `active` is the
+number of installs with a heartbeat that day at the trusts `/admin/{app}/stats` counts
+(`attested`, `verified`, `device`, `unverified`). The figure is computed once per app every
+ten minutes and served from memory between, with `Cache-Control: public, max-age=600`; the
+per-address request limit applies as on every public route.
 
 ## Admin endpoints
 

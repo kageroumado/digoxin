@@ -227,11 +227,8 @@ func (s *Store) stats(r *http.Request, app string, asOf time.Time, trusts []stri
 	}
 	rows.Close()
 
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(trusts)), ",")
-	args := []any{app, monthStart, day}
-	for _, t := range trusts {
-		args = append(args, t)
-	}
+	placeholders, trustArgs := inList(trusts)
+	args := append([]any{app, monthStart, day}, trustArgs...)
 	rows, err = s.db.QueryContext(ctx, `
 		WITH latest AS (
 			SELECT h.*, ROW_NUMBER() OVER (PARTITION BY h.install ORDER BY h.day DESC) AS rank
