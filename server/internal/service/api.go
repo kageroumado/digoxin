@@ -88,6 +88,10 @@ func New(store *Store, config *Config, crashDir string) (*Service, error) {
 		uploads: make(chan struct{}, config.CrashStorage.ConcurrentUploads),
 	}
 	for slug, cfg := range config.Apps {
+		if cfg.Web() {
+			s.Apps[slug] = &App{Config: cfg}
+			continue
+		}
 		judge := &identity.Judge{
 			AppID: cfg.AppAttestID, RequireProductionAttest: cfg.RequireProductionAttest,
 			Now: func() time.Time { return s.Now() }, Logf: prefixed(slug),
@@ -132,6 +136,7 @@ func (s *Service) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/{app}/heartbeats", s.withApp(s.handleHeartbeats))
 	mux.HandleFunc("POST /v1/{app}/crash-reports", s.withApp(s.handleCrashReport))
 	mux.HandleFunc("GET /v1/{app}/active", s.withApp(s.handleActive))
+	mux.HandleFunc("POST /v1/{app}/events", s.withEventsApp(s.handleEvent))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		securityHeaders(w)
 		_, _ = w.Write([]byte("ok\n"))
@@ -139,12 +144,13 @@ func (s *Service) Routes() *http.ServeMux {
 	return mux
 }
 
-// withApp resolves {app} and applies the per-address write limit, both
-// answered by the wrapper itself.
+// withApp resolves {app} to an attested app and applies the per-address
+// write limit, both answered by the wrapper itself. A web page is not an
+// app here: it has no installs to challenge, register or count.
 func (s *Service) withApp(handler func(http.ResponseWriter, *http.Request, *App)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		app := s.Apps[r.PathValue("app")]
-		if app == nil {
+		if app == nil || app.Config.Web() {
 			writeError(w, http.StatusNotFound, "unknown app")
 			return
 		}

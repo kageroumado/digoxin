@@ -23,6 +23,7 @@ import (
 //	GET /admin/apps
 //	GET /admin/{app}/stats?day=YYYY-MM-DD&trust=attested,device (day defaults to the newest day heartbeats carry)
 //	GET /admin/{app}/history?days=90
+//	GET /admin/{app}/events?days=30
 //	GET /admin/{app}/installs/{id}
 //	GET /admin/{app}/crashes?limit=50
 //	GET /admin/{app}/crashes/{id}
@@ -41,6 +42,7 @@ func (s *Service) AdminRoutes() http.Handler {
 	mux.HandleFunc("GET /admin/apps", s.adminApps)
 	mux.HandleFunc("GET /admin/{app}/stats", s.adminApp(s.adminStats))
 	mux.HandleFunc("GET /admin/{app}/history", s.adminApp(s.adminHistory))
+	mux.HandleFunc("GET /admin/{app}/events", s.adminApp(s.adminEvents))
 	mux.HandleFunc("GET /admin/{app}/installs/{id}", s.adminApp(s.adminInstall))
 	mux.HandleFunc("GET /admin/{app}/crashes", s.adminApp(s.adminCrashes))
 	mux.HandleFunc("GET /admin/{app}/crashes/{id}", s.adminApp(s.adminCrash))

@@ -57,7 +57,15 @@ type AppConfig struct {
 	// context fields.
 	CrashContext map[string]string `json:"crash_context"`
 	CrashReports CrashLimits       `json:"crash_reports"`
+	// Events names the anonymous counters a web page may add to through
+	// POST /v1/{app}/events ("view", "start", "complete"). An app with events
+	// and no app_attest_id is a web page: it has no installs, and the
+	// attested routes answer it 404.
+	Events []string `json:"events"`
 }
+
+// Web says whether the app is a page counted through events alone.
+func (a *AppConfig) Web() bool { return a.AppAttestID == "" }
 
 // DeviceCheckConfig names the team's DeviceCheck key by path; the key
 // itself never enters the config or the repository.
@@ -191,6 +199,25 @@ func (c *Config) checkBits() error {
 func (a *AppConfig) check() error {
 	if !reSlug.MatchString(a.Slug) {
 		return fmt.Errorf("slug must match %s", reSlug)
+	}
+	seen := map[string]bool{}
+	for _, name := range a.Events {
+		if !reSlug.MatchString(name) {
+			return fmt.Errorf("event %q must match %s", name, reSlug)
+		}
+		if seen[name] {
+			return fmt.Errorf("event %q is listed twice", name)
+		}
+		seen[name] = true
+	}
+	if a.Web() {
+		if len(a.Events) == 0 {
+			return fmt.Errorf("needs app_attest_id, or events for a web page")
+		}
+		if a.DeviceCheck != nil || len(a.Properties) > 0 || len(a.CrashContext) > 0 {
+			return fmt.Errorf("a web page has events only; device_check, properties and crash_context need app_attest_id")
+		}
+		return nil
 	}
 	if !reAppAttestID.MatchString(a.AppAttestID) {
 		return fmt.Errorf("app_attest_id %q is not TEAMID.bundle.id", a.AppAttestID)

@@ -64,6 +64,17 @@ CREATE TABLE IF NOT EXISTS daily_actives (
 	PRIMARY KEY (app, day, trust)
 );
 
+-- Anonymous page counters: one row per app, UTC day of arrival, event name
+-- and label (a test's id), holding only how many times it was sent.
+CREATE TABLE IF NOT EXISTS events (
+	app   TEXT NOT NULL,
+	day   TEXT NOT NULL,
+	name  TEXT NOT NULL,
+	label TEXT NOT NULL,
+	count INTEGER NOT NULL,
+	PRIMARY KEY (app, day, name, label)
+);
+
 CREATE TABLE IF NOT EXISTS crash_reports (
 	id       TEXT PRIMARY KEY,
 	install  TEXT NOT NULL REFERENCES installs(id) ON DELETE CASCADE,

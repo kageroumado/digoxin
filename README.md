@@ -18,6 +18,7 @@ Digoxin counts Mac app usage and collects scrubbed crash reports with per-instal
 - **Off** is the default: no key or request. Turning it off after use queues a signed deletion request and destroys the key.
 - **Counting** sends one heartbeat per active local day, with coarse device information and allowlisted app properties. The service answers yesterday's count on a public route (`GET /v1/{app}/active`), so an app can show how many Macs counted themselves in beside the toggle.
 - **Crash reports** adds locally scrubbed crash files and diagnostic context.
+- **Page counters**: an app configured with `events` and no App Attest ID is a web page; it sends `POST /v1/{app}/events` `{"name": "complete", "label": "raads-r"}` and the service adds one to that day's count for the name and label. Only the count is kept.
 
 Install IDs differ across apps. Attestation establishes an app/key relationship;
 DeviceCheck is needed to distinguish reinstalls, and its bits are limited.

@@ -115,6 +115,21 @@ that debug and source builds do not carry.)
 Stats count each trust tier separately; how much to believe `unverified` is the
 reader's call.
 
+## Page counters
+
+A web page cannot attest, so it counts through events: the apps file lists the names it may send, and
+nothing else about it.
+
+```json
+"spectra": {"events": ["view", "start", "complete"]}
+```
+
+`POST /v1/{app}/events` with `{"name": "complete", "label": "raads-r"}` adds one to the row
+(app, UTC day of arrival, name, label), answering 204. The label is a slug of at most 32 characters or
+empty; a day holds at most 64 distinct labels per event; the per-address write limit applies. The row is
+the count alone, so there is nothing to delete and no retention. `GET /admin/{app}/events?days=30` lists
+the rows. The attested routes answer such an app 404.
+
 ## Running the service
 
 ```sh
