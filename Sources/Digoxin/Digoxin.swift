@@ -95,6 +95,37 @@ public actor Digoxin {
         state.tier
     }
 
+    /// How many installs counted themselves in on the latest complete day,
+    /// from the service's public summary (`GET /v1/{app}/active`).
+    public struct ActiveCount: Sendable, Equatable, Decodable {
+        public var app: String
+        /// The day counted, `YYYY-MM-DD` in UTC: yesterday when the service answered.
+        public var day: String
+        public var active: Int
+
+        public init(app: String, day: String, active: Int) {
+            self.app = app
+            self.day = day
+            self.active = active
+        }
+    }
+
+    /// Asks the service how many installs counted themselves in yesterday:
+    /// the figure an app shows beside the person's choice. A plain GET that
+    /// names no install, so it works at every tier, ``ConsentTier/off``
+    /// included, and leaves ``status`` as it was. Throws when the service
+    /// cannot be reached or answers with anything but this app's count.
+    public func activeCount() async throws -> ActiveCount {
+        var request = URLRequest(url: configuration.endpoint("active"))
+        request.httpMethod = "GET"
+        let data = try await exchange(request)
+        let count = try JSONDecoder().decode(ActiveCount.self, from: data)
+        guard count.app == configuration.app else {
+            throw Failure.refused(status: 200, reason: "the count is for \(count.app)")
+        }
+        return count
+    }
+
     /// Where this client stands, for the app's settings to show.
     public var status: DigoxinStatus {
         if state.tier == .off {

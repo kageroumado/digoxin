@@ -127,6 +127,8 @@ final class FakeServer: Sendable {
         var offline = false
         var trust = "unverified"
         var hold: RegistrationHold?
+        /// Yesterday's count, answered to GET /active.
+        var active = 3
     }
 
     let state = Mutex(State())
@@ -188,6 +190,9 @@ final class FakeServer: Sendable {
         let id = r.headers["Digoxin-Install"] ?? ""
         let signature = r.headers["Digoxin-Signature"].flatMap { Data(base64Encoded: $0) }
             .flatMap { try? P256.Signing.ECDSASignature(derRepresentation: $0) }
+        if r.method == "GET", r.path.hasSuffix("/active") {
+            return json(200, ["app": "refrax", "day": "2026-10-04", "active": state.active])
+        }
         if r.method == "GET", r.path.hasSuffix("/challenge") {
             return json(200, ["challenge": Data((0 ..< 56).map { _ in UInt8.random(in: 0 ... 255) }).base64EncodedString()])
         }

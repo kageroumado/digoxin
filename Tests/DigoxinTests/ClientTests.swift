@@ -17,6 +17,54 @@ let morning = Date(timeIntervalSince1970: 1_791_187_200)
         makeClient(server: server, storage: storage, clock: clock, keyStore: keyStore)
     }
 
+    @Test func activeCountNamesNoInstallAndWorksWhileOff() async throws {
+        let client = client()
+        let count = try await client.activeCount()
+        #expect(count == Digoxin.ActiveCount(app: "refrax", day: "2026-10-04", active: 3))
+        let asked = server.requests("GET", "/active")
+        #expect(asked.count == 1)
+        #expect(asked.first?.headers["Digoxin-Install"] == nil)
+        #expect(asked.first?.headers["Digoxin-Signature"] == nil)
+        #expect(server.installs.isEmpty)
+        #expect(await client.status == .off)
+    }
+
+    @Test func activeCountOfAnotherAppIsRefused() async throws {
+        let server = FakeServer()
+        let configuration = Digoxin.Configuration(
+            app: "sevoflurane", baseURL: server.baseURL, storageDirectory: storage, log: { _ in },
+        )
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [MockURLProtocol.self]
+        let client = Digoxin(
+            configuration: configuration, keyStore: SoftwareKeyStore(), attestor: NoAttestor(),
+            sessionConfiguration: sessionConfiguration,
+        )
+        await #expect(throws: (any Error).self) { try await client.activeCount() }
+    }
+
+    @Test func reportsComeFromEveryFolderNewestLast() throws {
+        let user = temporaryFolder()
+        let system = temporaryFolder()
+        let missing = temporaryFolder().appendingPathComponent("absent")
+        let files = [
+            (user, "Example-2026-10-01-100000.ips", morning.addingTimeInterval(-7200)),
+            (user, "Example-2026-10-01-110000.ips", morning.addingTimeInterval(3600)),
+            (system, "Example-2026-10-01-103000.ips", morning.addingTimeInterval(1800)),
+            (system, "ExampleHelper-2026-10-01-104500.ips", morning.addingTimeInterval(2700)),
+            (system, "Example-2026-10-01-105000.crash", morning.addingTimeInterval(3000)),
+        ]
+        for (folder, name, created) in files {
+            let url = folder.appendingPathComponent(name)
+            try Data("{}".utf8).write(to: url)
+            try FileManager.default.setAttributes([.creationDate: created], ofItemAtPath: url.path)
+        }
+        let found = DiagnosticReports.reports(forProcess: "Example", after: morning, in: [user, missing, system])
+        #expect(found.map(\.lastPathComponent) == ["Example-2026-10-01-103000.ips", "Example-2026-10-01-110000.ips"])
+        let helper = DiagnosticReports.reports(forProcess: "ExampleHelper", after: morning, in: [user, system])
+        #expect(helper.map(\.lastPathComponent) == ["ExampleHelper-2026-10-01-104500.ips"])
+    }
+
     @Test func offSendsNothingAndKeepsNothing() async throws {
         let digoxin = client()
         #expect(await digoxin.tier == .off)

@@ -38,9 +38,15 @@ let telemetry = Digoxin(configuration: .init(
 await telemetry.setTier(settings.telemetryTier)   // whenever the person changes it
 await telemetry.recordUse()                       // at launch and when the app becomes active
 await telemetry.submitCrashReport(files: DiagnosticReports.reports(forProcess: "Example", after: lastLaunch))
+let count = try await telemetry.activeCount()    // "Yesterday, \(count.active) Macs counted themselves in."
 ```
 
-`Digoxin` is an actor; every call is safe from the main actor. `status` answers what
+`Digoxin` is an actor; every call is safe from the main actor. `activeCount()` is a plain
+GET of the service's public summary: it names no install and works at every tier, so the
+figure can sit beside the choice before it is made. `DiagnosticReports.reports` reads the
+account's `~/Library/Logs/DiagnosticReports` and the system `/Library/Logs/DiagnosticReports`,
+where the reports of a privileged helper or launch daemon land; the system folder is readable
+by administrators. `status` answers what
 settings should show (`off`, `deletionPending`, `secureEnclaveUnavailable`, `waiting`,
 `registered(trust:)`, `failing(reason:)`), and `tier` the stored choice.
 `Configuration.extraScrubRules` adds an app's own rewrites (`.replacing`, `.pattern`,

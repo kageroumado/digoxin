@@ -45,7 +45,10 @@ daily database backups until they rotate out, 30 days by default.
 above, `installLocation` (`applications`, `translocated` or `other`), the version
 before the last update, `consecutiveLaunchCrashes`, `secondsSinceLaunch`, and the
 app's allowlisted fields. Reports are kept 180 days, stamped with the day they
-arrived.
+arrived. The library finds an app's reports in the account's
+`~/Library/Logs/DiagnosticReports` and in `/Library/Logs/DiagnosticReports`, where macOS
+writes the reports of processes running as root (a privileged helper, a launch daemon);
+the system folder is readable by administrators and reads as empty for anyone else.
 
 Scrubbing happens in the library before a file is queued, so nothing unscrubbed is
 stored or sent:
@@ -211,7 +214,8 @@ in the server's clock (UTC), the newest day complete in every time zone, and `ac
 number of installs with a heartbeat that day at the trusts `/admin/{app}/stats` counts
 (`attested`, `verified`, `device`, `unverified`). The figure is computed once per app every
 ten minutes and served from memory between, with `Cache-Control: public, max-age=600`; the
-per-address request limit applies as on every public route.
+per-address request limit applies as on every public route. The Swift client reads it
+through `activeCount()`, which refuses an answer naming another app.
 
 ## Admin endpoints
 
