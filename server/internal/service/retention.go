@@ -15,6 +15,10 @@ const (
 	HeartbeatRetention = 400 * 24 * time.Hour
 	// CrashRetention is how long crash reports and their files stay.
 	CrashRetention = 180 * 24 * time.Hour
+	// IdleInstallRetention is how long an unverified install that never sent a
+	// heartbeat or a crash report stays. An app heartbeats right after it
+	// registers, and registers again when the server answers 401.
+	IdleInstallRetention = 7 * 24 * time.Hour
 )
 
 // retentionPass rolls heartbeats past HeartbeatRetention into daily
@@ -24,6 +28,7 @@ func (s *Service) retentionPass(ctx context.Context) error {
 	now := s.Now().UTC()
 	heartbeatCutoff := now.Add(-HeartbeatRetention).Format(dayLayout)
 	crashCutoff := now.Add(-CrashRetention).Format(dayLayout)
+	idleCutoff := now.Add(-IdleInstallRetention).Format(dayLayout)
 
 	st := s.Store
 	st.write.Lock()
@@ -41,6 +46,9 @@ func (s *Service) retentionPass(ctx context.Context) error {
 			SELECT h.app, h.day, i.trust, COUNT(*) FROM heartbeats h JOIN installs i ON i.id = h.install
 			WHERE h.day < ? GROUP BY h.app, h.day, i.trust`, []any{heartbeatCutoff}},
 		{`DELETE FROM heartbeats WHERE day < ?`, []any{heartbeatCutoff}},
+		{`DELETE FROM installs WHERE trust = 'unverified' AND last_seen < ?
+			AND NOT EXISTS (SELECT 1 FROM heartbeats h WHERE h.install = installs.id)
+			AND NOT EXISTS (SELECT 1 FROM crash_reports c WHERE c.install = installs.id)`, []any{idleCutoff}},
 	}
 	for _, step := range steps {
 		if _, err := tx.ExecContext(ctx, step.query, step.args...); err != nil {

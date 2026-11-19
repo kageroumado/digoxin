@@ -28,6 +28,9 @@ const (
 	// app per day; registering an install the server knows is not counted.
 	installsPerDay = 5
 	installsWindow = 24 * time.Hour
+	// allocationInstallsPerDay is the same count for an IPv6 /48: installsPerDay
+	// keys on the /64, and one customer's /48 holds 65,536 of those.
+	allocationInstallsPerDay = 20
 	// reregistrationsPerDay is how often one install may register again a
 	// day: each registration can cost a call to Apple.
 	reregistrationsPerDay = 3
@@ -56,9 +59,11 @@ type Service struct {
 	Apps       map[string]*App
 	Challenges *identity.Challenges
 	// Clients names the address a request comes from, for rate limits.
-	Clients         identity.ClientAddress
-	Writes          *identity.Limiter
-	Registrations   *identity.Limiter
+	Clients       identity.ClientAddress
+	Writes        *identity.Limiter
+	Registrations *identity.Limiter
+	// Allocations counts new installs per app and IPv6 /48 (address for IPv4).
+	Allocations     *identity.Limiter
 	Reregistrations *identity.Limiter
 	// CrashDir holds crash report files as <app>/<report id>/<name>.
 	CrashDir string
@@ -83,6 +88,7 @@ func New(store *Store, config *Config, crashDir string) (*Service, error) {
 		Store: store, Apps: map[string]*App{}, Challenges: identity.NewChallenges(), Clients: clients,
 		Writes:          identity.NewLimiter(writesPerMinute, time.Minute),
 		Registrations:   identity.NewLimiter(installsPerDay, installsWindow),
+		Allocations:     identity.NewLimiter(allocationInstallsPerDay, installsWindow),
 		Reregistrations: identity.NewLimiter(reregistrationsPerDay, installsWindow),
 		CrashDir:        crashDir, Storage: config.CrashStorage, Now: time.Now,
 		uploads: make(chan struct{}, config.CrashStorage.ConcurrentUploads),
@@ -291,12 +297,24 @@ func (s *Service) handleRegister(w http.ResponseWriter, r *http.Request, app *Ap
 	slot := app.Config.Slug + " " + s.Clients.Key(r)
 	refund := func() {}
 	if existing == nil {
+		// The allocation first: once a /48 is over its limit, the /64s it
+		// rotates through are never recorded.
+		allocation := app.Config.Slug + " " + s.Clients.AllocationKey(r)
+		if !s.Allocations.Admit(allocation, now) {
+			w.Header().Set("Retry-After", "3600")
+			writeError(w, http.StatusTooManyRequests, "too many new installs from this network today")
+			return
+		}
 		if !s.Registrations.Admit(slot, now) {
+			s.Allocations.Refund(allocation, now)
 			w.Header().Set("Retry-After", "3600")
 			writeError(w, http.StatusTooManyRequests, "too many new installs from this address today")
 			return
 		}
-		refund = func() { s.Registrations.Refund(slot, now) }
+		refund = func() {
+			s.Registrations.Refund(slot, now)
+			s.Allocations.Refund(allocation, now)
+		}
 	} else if !s.Reregistrations.Admit(app.Config.Slug+" "+id, now) {
 		w.Header().Set("Retry-After", "3600")
 		writeError(w, http.StatusTooManyRequests, "this install registered too often today")

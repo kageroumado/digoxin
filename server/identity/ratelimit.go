@@ -152,11 +152,26 @@ func (c ClientAddress) Key(r *http.Request) string {
 
 // LimitKey is an address as rate limits count it: IPv4 whole, IPv6 by /64.
 func LimitKey(addr netip.Addr) string {
+	return prefixKey(addr, 64)
+}
+
+// AllocationKey answers the key a daily limit counts the request's network
+// under: an IPv4 address, or an IPv6 address's /48, the block a tunnel broker
+// or an ISP hands one customer and which holds 65,536 of the /64s Key counts.
+func (c ClientAddress) AllocationKey(r *http.Request) string {
+	addr := c.client(r)
+	if !addr.IsValid() {
+		return r.RemoteAddr
+	}
+	return prefixKey(addr, 48)
+}
+
+func prefixKey(addr netip.Addr, bits int) string {
 	addr = addr.Unmap()
 	if addr.Is4() {
 		return addr.String()
 	}
-	prefix, _ := addr.WithZone("").Prefix(64)
+	prefix, _ := addr.WithZone("").Prefix(bits)
 	return prefix.String()
 }
 
